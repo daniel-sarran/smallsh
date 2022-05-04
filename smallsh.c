@@ -23,6 +23,11 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        /* Remove fgets trailing newline. */
+        if (command[strlen(command) - 1] == '\n') {
+            command[strlen(command) - 1] = 0; 
+        }
+
         /* Handle blank lines and comments.  */
         if (command[0] == '\n' || command[0] == '#') {
             continue;
@@ -38,20 +43,31 @@ int main(int argc, char* argv[]) {
         }
 
         /* Execute `exit`. */
-        if (strcmp(arguments[0], "exit\n") == 0) {
+        if (strcmp(arguments[0], "exit") == 0) {
             break;
         }
 
         /* Execute `cd`. */
-        if (strcmp(arguments[0], "cd") == 0 || 
-            strcmp(arguments[0], "cd\n") == 0) {
+        if (strcmp(arguments[0], "cd") == 0) {
             fprintf(stderr, "We changin direccs.\n");
         }
 
         /* Execute `status`. */
-        if (strcmp(arguments[0], "status\n") == 0) {
+        if (strcmp(arguments[0], "status") == 0) {
             fprintf(stderr, "We checcin' status.\n");
         }
+
+        /* Forks. */
+
+        /* In Child. */
+        /* Redirect stdin and stdout. */
+        /* Clean up args array. */
+        /* Exec. */
+        
+        /* In Parent. */
+        /* If command is in foreground: waitpid() on it and update status var. */
+        /* Else, don't (also if foreground-only mode flag is true). */
+
 
     }
 }
