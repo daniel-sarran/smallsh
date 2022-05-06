@@ -68,6 +68,7 @@ int main(void) {
         if (strcmp(shellState.arguments[0], EXIT) == 0) {
             /* Execute `exit` command. */
             cleanupProcessesBeforeExit(&shellState);
+            exit(0);
         } else if (strcmp(shellState.arguments[0], CD) == 0) {
             /* Execute `cd` command. */
             changeDirectory(&shellState);
