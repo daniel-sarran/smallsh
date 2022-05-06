@@ -51,7 +51,7 @@ int main(void) {
         fprintf(stderr, ": ");
 
         /* Receive user command. */
-        if (takeInput(&shellState) == 0) {
+        if (takeInput(&shellState) != 0) {
             err(1, "ERROR: fgets() failed. Please try again.\n");
             continue;
         }
@@ -92,13 +92,13 @@ int main(void) {
 int takeInput(ShellState* shellState) {
         /* Take input from stdin. */
         if(fgets(shellState->command, sizeof(shellState->command), stdin) == NULL) {
-            return 0;
+            return 1;
         }
         /* Remove fgets trailing newline. */
         if (shellState->command[strlen(shellState->command) - 1] == '\n') {
             shellState->command[strlen(shellState->command) - 1] = 0; 
         }
-        return 1;
+        return 0;
 }
 
 /*
