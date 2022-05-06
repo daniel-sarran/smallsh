@@ -29,7 +29,7 @@ typedef struct {
 /* Function prototypes. */
 int takeInput(ShellState* shellState);
 void parseArgumentTokens(ShellState* shellState);
-void exitShell(ShellState* shellState);
+void cleanupProcesses(ShellState* shellState);
 void changeDirectory(ShellState* shellState);
 void checkStatus(ShellState* shellState);
 int nonBuiltInCommand(ShellState* shellState);
@@ -64,7 +64,7 @@ int main(void) {
 
         /* Execute `exit` command. */
         if (strcmp(shellState.arguments[0], EXIT) == 0) {
-            exitShell(&shellState);
+            cleanupProcesses(&shellState);
             continue;
         }
         /* Execute `cd` command. */
@@ -87,7 +87,7 @@ int main(void) {
 }
 
 /*
- * Rece
+ * TODO: docstring
  */
 int takeInput(ShellState* shellState) {
         /* Take input from stdin. */
@@ -102,7 +102,7 @@ int takeInput(ShellState* shellState) {
 }
 
 /*
- *
+ * TODO: docstring
  */
 void parseArgumentTokens(ShellState* shellState) {
     /* Break line into tokens delimited by space character. */
@@ -130,9 +130,9 @@ void parseArgumentTokens(ShellState* shellState) {
 }
 
 /*
- *
+ * TODO: docstring
  */
-void exitShell(ShellState* shellState) {
+void cleanupProcesses(ShellState* shellState) {
     // TODO: kill child and zombie processes.
 }
 
@@ -160,7 +160,7 @@ void changeDirectory(ShellState* shellState) {
 }
 
 /*
- *
+ * TODO: docstring
  */
 void checkStatus(ShellState* shellState) {
     // TODO: check status.
@@ -168,7 +168,7 @@ void checkStatus(ShellState* shellState) {
 }
 
 /*
- *
+ * TODO: docstring
  */
 int nonBuiltInCommand(ShellState* shellState) {
     pid_t spawnPid = -5;
@@ -177,16 +177,17 @@ int nonBuiltInCommand(ShellState* shellState) {
     if (spawnPid == -1) {
         perror("ERROR: fork() failed.");
         return 1;
-    } else if (spawnPid == 0) {
-        // Child process
+    } else if (spawnPid == 0) { // Child process
 
-        // Redirect stdin and stdout as necessary
-        // Clean up args array
-        // Exec
+        // TODO: Redirect stdin and stdout as necessary
+        // TODO: Clean up args array
+
+        // Execute command with arguments.
         execvp(*shellState->arguments, shellState->arguments);
         return 1;
 
     } // Parent process
+
     // IF: Command is in the foreground:
     waitpid(spawnPid, &childExitMethod, 0);
 
@@ -197,7 +198,7 @@ int nonBuiltInCommand(ShellState* shellState) {
         shellState->status = WTERMSIG(childExitMethod);
     }
 
-    // ELSE: Don't (also if foreground-only mode flag is true)
+    // TODO: ELSE: Don't (also if foreground-only mode flag is true)
     
     /* Reset fork flag. */
     shellState->isForkActive = false;
