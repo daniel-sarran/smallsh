@@ -23,6 +23,7 @@ typedef struct {
     char commandString[MAX_COMMAND_LINE_LENGTH + 1];
     char expanded[MAX_COMMAND_LINE_LENGTH + 1];
     bool isForkActive;
+    bool executeInBackground;
     int status;
     pid_t pid;
 } ShellState;
@@ -77,8 +78,8 @@ int main(void) {
             checkStatus(&shellState);
         } else {
             /* Execute non-built-in command. */
-            shellState.isForkActive = true;
-            executeCommand(&shellState);  // isForkActive flag resets.
+            shellState.isForkActive = true;  // Prevents fork bombs.
+            executeCommand(&shellState);     // Will reset isForkActive flag.
         }
     }
 }
@@ -156,6 +157,10 @@ void parseArgumentTokens(ShellState* shellState) {
         token = strtok(NULL, " ");
     }
     shellState->arguments[i] = NULL;
+
+    /* If last character of command is '&', set background flag. */
+    if (*shellState->arguments[i - 1] == '&')
+        shellState->executeInBackground = true;
 }
 
 /*
@@ -211,7 +216,9 @@ int executeCommand(ShellState* shellState) {
     }  // Parent process
 
     // IF: Command is in the foreground:
-    waitpid(spawnPid, &childExitMethod, 0);
+    if (shellState->executeInBackground == false) {
+        waitpid(spawnPid, &childExitMethod, 0);
+    }
 
     /* Update exit status. */
     if (WIFEXITED(childExitMethod) != 0) {
