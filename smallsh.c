@@ -1,3 +1,11 @@
+
+/* 
+ * Author: Daniel Sarran
+ * CS 344
+ * Assignment: smallsh
+ * Spring 2022
+ */
+
 /* Headers. */
 #include <err.h>
 #include <fcntl.h>
@@ -18,7 +26,7 @@ const char* CD = "cd";
 const char* STATUS = "status";
 const char* EXIT = "exit";
 
-/* Structures. */
+/* Main shell state structure. */
 typedef struct {
     char* arguments[MAX_ARGUMENT_COUNT + 1];
     char commandString[MAX_COMMAND_LINE_LENGTH + 1];
@@ -43,7 +51,9 @@ void checkStatus(ShellState* shellState);
 int executeCommand(ShellState* shellState);
 
 /*
- * Creates a small shell. Not large. Not Medium. Smol.
+ * Main loop. Creates a small shell. Not large. Not Medium. Smol. Supports
+ * file navigation, shell commands using forking, I/O redirection operators as 
+ * well as * execution of background processes and orphan reaping.
  */
 int main(void) {
     /* Initialize shellState.command line structure. */
@@ -89,7 +99,9 @@ int main(void) {
 }
 
 /*
- * Prompts user for command and arguments.
+ * Prompts user for command and arguments. Takes in a line of input via stdin.
+ * Removes trailing newline. Receives shell state struct. Returns 0 if success,
+ * 1 otherwise.
  */
 int takeInput(ShellState* shellState) {
     /* Command prompt. */
@@ -109,9 +121,12 @@ int takeInput(ShellState* shellState) {
 }
 
 /*
- * Performs variable expansion from `commandString` and copies to `expanded`.
+ * Performs variable expansion from `commandString` buffer and copies to 
+ * `expanded` buffer. Instances of "$$" are replaced by a string of the
+ * shell process ID. Receives a shell state struct.
  */
 void expandCommand(ShellState* shellState) {
+    /* Create string of pid.  */
     char* pidstr;
     {
         int n = snprintf(NULL, 0, "%ld", shellState->pid);
@@ -122,9 +137,10 @@ void expandCommand(ShellState* shellState) {
     char* cmd = shellState->commandString;
     char* exp = shellState->expanded;
 
-    /* Read in character by character, replace "$$" with pid. */
-    int i = 0;
-    int j = 0;
+    /* Read command string, replacing "$$" with pid string when writing. */
+    int i = 0;  // Read buffer index.
+    int j = 0;  // Write buffer index.
+
     while (cmd[i] != 0) {
         if (cmd[i] == '$' && cmd[i + 1] == '$') {
             /* Two consecutive '$' character, replace with pid string. */
@@ -144,16 +160,6 @@ void expandCommand(ShellState* shellState) {
             exp[j] = cmd[i];
             i++;
             j++;
-
-            /* Monitor for redirection operators.  */
-            //if (cmd[i] == '<' && i != 0 && cmd[i - 1] == ' ' &&
-            //    cmd[i + 1] == ' ') {
-            //    shellState->hasInputRedirect = true;
-
-            //} else if (cmd[i] == '>' && i != 0 && cmd[i - 1] == ' ' &&
-                       //cmd[i + 1] == ' ') {
-                //shellState->hasOutputRedirect = true;
-            //}
         }
     }
     free(pidstr);
@@ -162,9 +168,8 @@ void expandCommand(ShellState* shellState) {
 
 /*
  * Convert expanded user command string into an array of arguments. The
- * arguments in the command string are space-delimited. Redirection operators
- * and background process operator are identified and cached in the shellState
- * struct.
+ * arguments in the command string are space-delimited. Identifies redirection 
+ * operators and background process operators.
  */
 void parseArgumentTokens(ShellState* shellState) {
     char* token = strtok(shellState->expanded, " ");
@@ -185,13 +190,9 @@ void parseArgumentTokens(ShellState* shellState) {
         } else {
             shellState->arguments[i] = token;
         }
-        
         i++;
         token = strtok(NULL, " ");
     }
-    printf("inputRedirect flag is %s, the arguments[] index is %d, and the filename is %s\n", shellState->hasInputRedirect ? "true" : "false", shellState->inputFileArgIndex, shellState->arguments[shellState->inputFileArgIndex]);
-    printf("outputRedirect flag is %s, the arguments[] index is %d, and the filename is %s\n", shellState->hasOutputRedirect ? "true" : "false", shellState->outputFileArgIndex, shellState->arguments[shellState->outputFileArgIndex]);
-
     shellState->arguments[i] = NULL;
 
     /* If last character of command is '&', set background flag. */
@@ -200,37 +201,41 @@ void parseArgumentTokens(ShellState* shellState) {
 }
 
 /*
- * Terminates any child processes of shell before exiting program.
+ * Terminates any child processes of shell before exiting program. Receives
+ * a shell state struct.
  */
 void cleanupProcessesBeforeExit(ShellState* shellState) {
     // TODO: kill child and zombie processes.
 }
 
 /*
- * Change shell directory.
+ * Change shell directory. If no path is provided, changes directory to the
+ * user's HOME environment variable. Supports both relative and absolute 
+ * directory changes.
  */
 void changeDirectory(ShellState* shellState) {
     char cwd[256];
 
-    /* Change directory, no path provided. */
-    if (shellState->arguments[1] == NULL) {
+    if (shellState->arguments[1] == NULL) {  // No path provided.
         if (chdir(getenv("HOME")) != 0) perror("chdir() error()");
     } else {
-        /* Change directory, path provided. */
         if (chdir(shellState->arguments[1]) != 0) perror("chdir() error()");
     }
 }
 
 /*
- * Checks last foreground program termination status.
+ * Checks last foreground program termination status. Receives shell state
+ * struct. 
  */
 void checkStatus(ShellState* shellState) {
     // TODO: check status.
-    printf("exit value %d\n", shellState->status);
+    fprintf(stdout, "exit value %d\n", shellState->status);
 }
 
 /*
- * Executes a non-built-in command from $PATH.
+ * Executes a non-built-in command with user provided arguments. Handles 
+ * input/output redirection. Receives shell state struct and returns 0 when
+ * successful, 1 otherwise.
  */
 int executeCommand(ShellState* shellState) {
     pid_t spawnPid = -5;
@@ -242,21 +247,17 @@ int executeCommand(ShellState* shellState) {
         return 1;
 
     } else if (spawnPid == 0) {  // Child process
-
-        // TODO: Redirect stdin and stdout as necessary
+        /* Change file descriptors prior to execution, for redirection. */
         if (shellState->hasInputRedirect == true) {
-            // open file
             int sourceFileDescriptor = open(shellState->arguments[shellState->inputFileArgIndex], O_RDONLY);
             if (sourceFileDescriptor == -1) {
                 perror("source open()");
                 return 1;
             }
-            // swap file descriptors
             if (dup2(sourceFileDescriptor, 0) == -1) {
                 perror("source dup2()");
                 return 1;
             }
-
         }
         if (shellState->hasOutputRedirect == true) {
             int targetFileDescriptor = open(shellState->arguments[shellState->outputFileArgIndex], O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -264,16 +265,12 @@ int executeCommand(ShellState* shellState) {
                 perror("target dup2()");
                 return 1;
             }
-            // swap file descriptrs
             if (dup2(targetFileDescriptor, 1)  == -1) {
                 perror("target dup2()");
                 return 1;
             }
         }
-
-        // TODO: Clean up args array
-
-        // Execute command with arguments.
+        /* Execute command. */
         execvp(*shellState->arguments, shellState->arguments);
         perror("  ERROR: execvp() failed");
         return 1;
