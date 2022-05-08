@@ -1,5 +1,6 @@
 /* Headers. */
 #include <err.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +24,11 @@ typedef struct {
     char commandString[MAX_COMMAND_LINE_LENGTH + 1];
     char expanded[MAX_COMMAND_LINE_LENGTH + 1];
     bool isForkActive;
-    bool executeInBackground;
+    bool hasBackgroundFlag;
+    bool hasInputRedirect;
+    bool hasOutputRedirect;
+    int inputFileArgIndex;
+    int outputFileArgIndex;
     int status;
     pid_t pid;
 } ShellState;
@@ -38,7 +43,7 @@ void checkStatus(ShellState* shellState);
 int executeCommand(ShellState* shellState);
 
 /*
- * Creates a small shell.
+ * Creates a small shell. Not large. Not Medium. Smol.
  */
 int main(void) {
     /* Initialize shellState.command line structure. */
@@ -59,25 +64,24 @@ int main(void) {
             shellState.commandString[0] == '#') {
             continue;
         }
-        /* Process variable expansion. */
+        /* Process variable expansion on user input string. */
         expandCommand(&shellState);
 
-        /* Split user input into arguments. */
+        /* Split user input string into arguments array. */
         parseArgumentTokens(&shellState);
 
         /* Execute command as built-in or otherwise. */
         if (strcmp(shellState.arguments[0], EXIT) == 0) {
-            /* Execute `exit` command. */
             cleanupProcessesBeforeExit(&shellState);
             exit(0);
+
         } else if (strcmp(shellState.arguments[0], CD) == 0) {
-            /* Execute `cd` command. */
             changeDirectory(&shellState);
+
         } else if (strcmp(shellState.arguments[0], STATUS) == 0) {
-            /* Execute `status` command. */
             checkStatus(&shellState);
+
         } else {
-            /* Execute non-built-in command. */
             shellState.isForkActive = true;  // Prevents fork bombs.
             executeCommand(&shellState);     // Will reset isForkActive flag.
         }
@@ -122,22 +126,34 @@ void expandCommand(ShellState* shellState) {
     int i = 0;
     int j = 0;
     while (cmd[i] != 0) {
-        if (cmd[i] != '$') {
-            /* Non '$' character, copy to expanded. */
-            exp[j] = cmd[i];
-            i++;
-            j++;
-        } else if (cmd[i] == '$' && cmd[i + 1] == '$') {
+        if (cmd[i] == '$' && cmd[i + 1] == '$') {
             /* Two consecutive '$' character, replace with pid string. */
             strcat(exp, pidstr);
             i += 2;
             j += pidLength;
-        } else {
+
+        } else if (cmd[i] == '$' && cmd[i + 1] != '$') {
             /* One '$' character only, copy next two characters to expanded. */
             exp[j] = cmd[i];
             exp[j + 1] = cmd[i + 1];
             i += 2;
             j += 2;
+
+        } else {
+            /* Non '$' character, copy to expanded. */
+            exp[j] = cmd[i];
+            i++;
+            j++;
+
+            /* Monitor for redirection operators.  */
+            //if (cmd[i] == '<' && i != 0 && cmd[i - 1] == ' ' &&
+            //    cmd[i + 1] == ' ') {
+            //    shellState->hasInputRedirect = true;
+
+            //} else if (cmd[i] == '>' && i != 0 && cmd[i - 1] == ' ' &&
+                       //cmd[i + 1] == ' ') {
+                //shellState->hasOutputRedirect = true;
+            //}
         }
     }
     free(pidstr);
@@ -145,22 +161,42 @@ void expandCommand(ShellState* shellState) {
 }
 
 /*
- * Convert user command string into an array of arguments.
+ * Convert expanded user command string into an array of arguments. The
+ * arguments in the command string are space-delimited. Redirection operators
+ * and background process operator are identified and cached in the shellState
+ * struct.
  */
 void parseArgumentTokens(ShellState* shellState) {
-    /* Break line into tokens delimited by space character. */
     char* token = strtok(shellState->expanded, " ");
     int i = 0;
     while (token != NULL) {
-        shellState->arguments[i] = token;
+        if (strcmp(token, "<") == 0) {
+            /* Input redirect detection and filename caching.  */
+            shellState->arguments[i] = NULL;
+            shellState->hasInputRedirect = true;
+            shellState->inputFileArgIndex = i + 1;
+
+        } else if (strcmp(token, ">") == 0) {
+            /* Output redirect detection and filename caching.  */
+            shellState->arguments[i] = NULL;
+            shellState->hasOutputRedirect = true;
+            shellState->outputFileArgIndex = i + 1;
+
+        } else {
+            shellState->arguments[i] = token;
+        }
+        
         i++;
         token = strtok(NULL, " ");
     }
+    printf("inputRedirect flag is %s, the arguments[] index is %d, and the filename is %s\n", shellState->hasInputRedirect ? "true" : "false", shellState->inputFileArgIndex, shellState->arguments[shellState->inputFileArgIndex]);
+    printf("outputRedirect flag is %s, the arguments[] index is %d, and the filename is %s\n", shellState->hasOutputRedirect ? "true" : "false", shellState->outputFileArgIndex, shellState->arguments[shellState->outputFileArgIndex]);
+
     shellState->arguments[i] = NULL;
 
     /* If last character of command is '&', set background flag. */
     if (*shellState->arguments[i - 1] == '&')
-        shellState->executeInBackground = true;
+        shellState->hasBackgroundFlag = true;
 }
 
 /*
@@ -200,12 +236,41 @@ int executeCommand(ShellState* shellState) {
     pid_t spawnPid = -5;
     int childExitMethod = -5;
     spawnPid = fork();
+
     if (spawnPid == -1) {
         perror("fork() failed.");
         return 1;
+
     } else if (spawnPid == 0) {  // Child process
 
         // TODO: Redirect stdin and stdout as necessary
+        if (shellState->hasInputRedirect == true) {
+            // open file
+            int sourceFileDescriptor = open(shellState->arguments[shellState->inputFileArgIndex], O_RDONLY);
+            if (sourceFileDescriptor == -1) {
+                perror("source open()");
+                return 1;
+            }
+            // swap file descriptors
+            if (dup2(sourceFileDescriptor, 0) == -1) {
+                perror("source dup2()");
+                return 1;
+            }
+
+        }
+        if (shellState->hasOutputRedirect == true) {
+            int targetFileDescriptor = open(shellState->arguments[shellState->outputFileArgIndex], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (targetFileDescriptor == -1) {
+                perror("target dup2()");
+                return 1;
+            }
+            // swap file descriptrs
+            if (dup2(targetFileDescriptor, 1)  == -1) {
+                perror("target dup2()");
+                return 1;
+            }
+        }
+
         // TODO: Clean up args array
 
         // Execute command with arguments.
@@ -213,21 +278,21 @@ int executeCommand(ShellState* shellState) {
         perror("  ERROR: execvp() failed");
         return 1;
 
-    }  // Parent process
-
-    // IF: Command is in the foreground:
-    if (shellState->executeInBackground == false) {
+    } // Parent process.
+    if (shellState->hasBackgroundFlag == false) {
+        // IF: Command is in the foreground:
         waitpid(spawnPid, &childExitMethod, 0);
-    }
+        /* Update exit status. */
+        if (WIFEXITED(childExitMethod) != 0) {
+            shellState->status = WEXITSTATUS(childExitMethod);
+        } else {
+            shellState->status = WTERMSIG(childExitMethod);
+        }
 
-    /* Update exit status. */
-    if (WIFEXITED(childExitMethod) != 0) {
-        shellState->status = WEXITSTATUS(childExitMethod);
     } else {
-        shellState->status = WTERMSIG(childExitMethod);
+        // ELSE: Don't (also if foreground-only mode flag is true)
+        // TODO: waitpid(... WNOHANG)
     }
-
-    // TODO: ELSE: Don't (also if foreground-only mode flag is true)
 
     /* Reset fork flag. */
     shellState->isForkActive = false;
