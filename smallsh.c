@@ -9,6 +9,7 @@
 /* Headers. */
 #include <err.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +29,8 @@ const char* STATUS = "status";
 const char* EXIT = "exit";
 
 /*
+ * Structures.
+ *
  * Shell state structure.
  * Rather than hold various flags and memory blocks and manually passing them
  * to functions, and clearing them at each new command prompt, everything
@@ -59,6 +62,8 @@ void cleanupProcessesBeforeExit(ShellState* shellState);
 void changeDirectory(ShellState* shellState);
 void checkStatus(ShellState* shellState);
 int executeCommand(ShellState* shellState);
+void SIGINT_handler(int signo);
+void SIGTSTP_handler(int signo);
 
 /*
  * Main loop. Creates a small shell. Not large. Not Medium. Smol. Supports
@@ -67,6 +72,16 @@ int executeCommand(ShellState* shellState);
  */
 int main(void) {
     ShellState shellState;
+
+    struct sigaction SIGINT_action = {0};
+    SIGINT_action.sa_handler = SIGINT_handler;
+    sigfillset(&SIGINT_action.sa_mask);
+    SIGINT_action.sa_flags = 0;
+    //sigaction(SIGINT, &SIGINT_action, NULL);
+
+    struct sigaction ignore_action = {0};
+    ignore_action.sa_handler = SIG_IGN;
+    sigaction(SIGINT, &ignore_action, NULL);
 
     while (shellState.isForkActive == false) {
         /* Reap background processes.  */
@@ -214,8 +229,9 @@ void parseArgumentTokens(ShellState* shellState) {
     }
     shellState->arguments[i] = NULL;
 
-    /* If last character of command is '&', set background flag. */
-    if (*shellState->arguments[i - 1] == '&') {
+    /* Set background mode if applicable, unless in foreground-only mode. */
+    if (*shellState->arguments[i - 1] == '&' &&
+        shellState->hasForegroundOnlyFlag == false) {
         shellState->hasBackgroundFlag = true;
         shellState->arguments[i - 1] = NULL;
     }
@@ -226,7 +242,13 @@ void parseArgumentTokens(ShellState* shellState) {
  * a shell state struct.
  */
 void cleanupProcessesBeforeExit(ShellState* shellState) {
-    // TODO: kill child and zombie processes.
+    for (int i = 0; i < BACKGROUND_PID_ARRAY_LENGTH; i++) {
+        pid_t value = shellState->backgroundProcesses[i];
+        if (value != 0) {
+            kill(value, SIGTERM);
+            printf("we have removed process %ld\n", value);
+        }
+    }
 }
 
 /*
@@ -271,6 +293,8 @@ int executeCommand(ShellState* shellState) {
             return 1;
 
         case 0:
+            /* Child process.  */
+
             /* Redirect input, as necessary. */
             if (shellState->hasInputRedirect == true) {
                 int sourceFileDescriptor =
@@ -280,14 +304,14 @@ int executeCommand(ShellState* shellState) {
                     fprintf(
                         stdout, "cannot open %s for input\n",
                         shellState->arguments[shellState->inputFileArgIndex]);
-                    fflush(stdout);                    
+                    fflush(stdout);
                     shellState->isForkActive = false;
                     shellState->status = 1;
                     exit(1);
                 }
                 if (dup2(sourceFileDescriptor, 0) == -1) {
                     fprintf(stdout, "unable to redirect input\n");
-                    fflush(stdout);                    
+                    fflush(stdout);
                     shellState->isForkActive = false;
                     exit(1);
                 }
@@ -323,6 +347,8 @@ int executeCommand(ShellState* shellState) {
             exit(1);
 
         default:
+            /* Parent process. */
+
             if (shellState->hasBackgroundFlag == false) {
                 /* Foreground processes: child blocks parent.  */
                 waitpid(spawnPid, &childExitMethod, 0);
@@ -333,7 +359,6 @@ int executeCommand(ShellState* shellState) {
                 } else {
                     shellState->status = WTERMSIG(childExitMethod);
                 }
-
             } else {
                 /* Background processes: child does not block.  */
                 waitpid(spawnPid, &childExitMethod, WNOHANG);
@@ -342,25 +367,39 @@ int executeCommand(ShellState* shellState) {
 
                 /* Cache pid of current background process into buffer. */
                 for (int i = 0; i < BACKGROUND_PID_ARRAY_LENGTH; i++) {
-                    if (shellState->backgroundProcesses[i] == 0) {
-                        shellState->backgroundProcesses[i] = spawnPid;
-                        break;
-                    }
+                    shellState->backgroundProcesses[i] = spawnPid;
+                    break;
                 }
             }
+
             /* Reset fork flag. */
             shellState->isForkActive = false;
 
             /* Reap background processes prior to next prompt.  */
             pid_t pid;
             while ((pid = waitpid(-1, &childExitMethod, WNOHANG)) > 0)
-                    if (WIFEXITED(childExitMethod) != 0) {
-                        fprintf(stdout, "background pid %ld is done: exit status %d\n", pid, WEXITSTATUS(childExitMethod));
-                    } else {
-                        fprintf(stdout, "background pid %ld is done: terminated by signal %d\n", pid, WTERMSIG(childExitMethod));
-                    }
-                    fflush(stdout);
+                if (WIFEXITED(childExitMethod) != 0) {
+                    fprintf(stdout,
+                            "background pid %ld is done: exit status %d\n", pid,
+                            WEXITSTATUS(childExitMethod));
+                } else {
+                    fprintf(
+                        stdout,
+                        "background pid %ld is done: terminated by signal %d\n",
+                        pid, WTERMSIG(childExitMethod));
+                }
+            fflush(stdout);
 
             return 0;
     }
 }
+
+/*
+ *
+ */
+void SIGINT_handler(int signo) {}
+
+/*
+ *
+ */
+void SIGTSTP_handler(int signo) {}
