@@ -27,6 +27,8 @@
 const char* CD = "cd";
 const char* STATUS = "status";
 const char* EXIT = "exit";
+int status = 0;
+volatile sig_atomic_t isForegroundOnly = 0;
 
 /*
  * Structures.
@@ -44,7 +46,6 @@ typedef struct {
     pid_t backgroundProcesses[BACKGROUND_PID_ARRAY_LENGTH];
     bool isForkActive;
     bool hasBackgroundFlag;
-    bool hasForegroundOnlyFlag;
     bool hasInputRedirect;
     bool hasOutputRedirect;
     int inputFileArgIndex;
@@ -54,8 +55,7 @@ typedef struct {
 } ShellState;
 
 /* Function prototypes. */
-void reapBackgroundProcesses(ShellState* shellState);
-int takeInput(ShellState* shellState);
+void takeInput(ShellState* shellState);
 void parseArgumentTokens(ShellState* shellState);
 void expandCommand(ShellState* shellState);
 void cleanupProcessesBeforeExit(ShellState* shellState);
@@ -74,29 +74,25 @@ int main(void) {
     ShellState shellState;
 
     struct sigaction SIGINT_action = {0};
-    SIGINT_action.sa_handler = SIGINT_handler;
+    SIGINT_action.sa_handler = SIG_IGN;
     sigfillset(&SIGINT_action.sa_mask);
     SIGINT_action.sa_flags = 0;
-    //sigaction(SIGINT, &SIGINT_action, NULL);
+    sigaction(SIGINT, &SIGINT_action, NULL);
 
-    struct sigaction ignore_action = {0};
-    ignore_action.sa_handler = SIG_IGN;
-    sigaction(SIGINT, &ignore_action, NULL);
+    struct sigaction SIGTSTP_action = {0};
+    SIGTSTP_action.sa_handler = SIGTSTP_handler;
+    sigfillset(&SIGTSTP_action.sa_mask);
+    SIGTSTP_action.sa_flags = 0;
+    sigaction(SIGTSTP, &SIGTSTP_action, NULL);
 
     while (shellState.isForkActive == false) {
-        /* Reap background processes.  */
-        reapBackgroundProcesses(&shellState);
-
-        /* Clear shell state and issue prompt. */
+        /* Clear shell state prior to prompt. */
         memset(&shellState, 0, sizeof(shellState));
         shellState.pid = getpid();
 
         /* Prompt and receive user command. */
-        if (takeInput(&shellState) != 0) {
-            fprintf(stdout, "fgets() error");
-            fflush(stdout);
-            continue;
-        }
+        takeInput(&shellState);
+
         /* Handle blank lines and comments.  */
         if (shellState.commandString[0] == 0 ||
             shellState.commandString[0] == '#') {
@@ -127,31 +123,22 @@ int main(void) {
 }
 
 /*
- *
- */
-void reapBackgroundProcesses(ShellState* shellState) {}
-
-/*
  * Prompts user for command and arguments. Takes in a line of input via stdin.
  * Removes trailing newline. Receives shell state struct. Returns 0 if success,
  * 1 otherwise.
  */
-int takeInput(ShellState* shellState) {
+void takeInput(ShellState* shellState) {
     /* Command prompt. */
     fprintf(stderr, ": ");
     fflush(stdout);
 
     /* Take input from stdin. */
-    if (fgets(shellState->commandString, sizeof(shellState->commandString),
-              stdin) == NULL) {
-        return 1;
-    }
+    fgets(shellState->commandString, sizeof(shellState->commandString), stdin);
     /* Remove fgets trailing newline. */
     int cmdLength = strlen(shellState->commandString);
     if (shellState->commandString[cmdLength - 1] == '\n') {
         shellState->commandString[cmdLength - 1] = 0;
     }
-    return 0;
 }
 
 /*
@@ -230,9 +217,10 @@ void parseArgumentTokens(ShellState* shellState) {
     shellState->arguments[i] = NULL;
 
     /* Set background mode if applicable, unless in foreground-only mode. */
-    if (*shellState->arguments[i - 1] == '&' &&
-        shellState->hasForegroundOnlyFlag == false) {
-        shellState->hasBackgroundFlag = true;
+    if (*shellState->arguments[i - 1] == '&') {
+        if (isForegroundOnly == false) {
+            shellState->hasBackgroundFlag = true;
+        }
         shellState->arguments[i - 1] = NULL;
     }
 }
@@ -271,7 +259,7 @@ void changeDirectory(ShellState* shellState) {
  * struct.
  */
 void checkStatus(ShellState* shellState) {
-    fprintf(stdout, "exit value %d\n", shellState->status);
+    fprintf(stdout, "exit value %d\n", status);
     fflush(stdout);
 }
 
@@ -286,15 +274,12 @@ int executeCommand(ShellState* shellState) {
     spawnPid = fork();
 
     switch (spawnPid) {
-        case -1:
-            /* Handle forking errors.  */
+        case -1: /* Fork error.  */
             fprintf(stdout, "fork() failed.");
             fflush(stdout);
             return 1;
 
-        case 0:
-            /* Child process.  */
-
+        case 0: /* Child process.  */
             /* Redirect input, as necessary. */
             if (shellState->hasInputRedirect == true) {
                 int sourceFileDescriptor =
@@ -305,14 +290,11 @@ int executeCommand(ShellState* shellState) {
                         stdout, "cannot open %s for input\n",
                         shellState->arguments[shellState->inputFileArgIndex]);
                     fflush(stdout);
-                    shellState->isForkActive = false;
-                    shellState->status = 1;
                     exit(1);
                 }
                 if (dup2(sourceFileDescriptor, 0) == -1) {
                     fprintf(stdout, "unable to redirect input\n");
                     fflush(stdout);
-                    shellState->isForkActive = false;
                     exit(1);
                 }
             }
@@ -326,28 +308,34 @@ int executeCommand(ShellState* shellState) {
                         stdout, "cannot open %s for output",
                         shellState->arguments[shellState->inputFileArgIndex]);
                     fflush(stdout);
-                    shellState->isForkActive = false;
-                    shellState->status = 1;
+                    status = 1;
                     exit(1);
                 }
                 if (dup2(targetFileDescriptor, 1) == -1) {
                     fprintf(stdout, "unable to redirect output");
                     fflush(stdout);
-                    shellState->isForkActive = false;
                     exit(1);
                 }
             }
+
+            /* If foreground process, give SIGINT has default behavior.  */
+            if (shellState->hasBackgroundFlag == false) {
+                struct sigaction SIGINT_action = {0};
+                SIGINT_action.sa_handler = SIG_DFL;
+                sigfillset(&SIGINT_action.sa_mask);
+                SIGINT_action.sa_flags = 0;
+                sigaction(SIGINT, &SIGINT_action, NULL);
+            }
+
             /* Execute command. */
             execvp(*shellState->arguments, shellState->arguments);
 
             /* Error handling for execvp. */
             fprintf(stdout, "unable to execute command\n");
             fflush(stdout);
-            shellState->isForkActive = false;
             exit(1);
 
-        default:
-            /* Parent process. */
+        default: /* Parent process. */
 
             if (shellState->hasBackgroundFlag == false) {
                 /* Foreground processes: child blocks parent.  */
@@ -355,9 +343,11 @@ int executeCommand(ShellState* shellState) {
 
                 /* Update exit status of foreground process. */
                 if (WIFEXITED(childExitMethod) != 0) {
-                    shellState->status = WEXITSTATUS(childExitMethod);
+                    printf("exit status was %d\n", WEXITSTATUS(childExitMethod));
+                    status = WEXITSTATUS(childExitMethod);
                 } else {
-                    shellState->status = WTERMSIG(childExitMethod);
+                    status = WTERMSIG(childExitMethod);
+                    fprintf(stdout, "terminated by signal %d\n", childExitMethod);
                 }
             } else {
                 /* Background processes: child does not block.  */
@@ -382,24 +372,32 @@ int executeCommand(ShellState* shellState) {
                     fprintf(stdout,
                             "background pid %ld is done: exit status %d\n", pid,
                             WEXITSTATUS(childExitMethod));
+                    fflush(stdout);
+
                 } else {
                     fprintf(
                         stdout,
                         "background pid %ld is done: terminated by signal %d\n",
                         pid, WTERMSIG(childExitMethod));
+                    fflush(stdout);
                 }
-            fflush(stdout);
 
             return 0;
     }
 }
 
 /*
- *
+ * Handler for SIGTSTP signal. Blocks all signals. Toggles global variable
+ * `isForegroundOnly` from 1 to 0 and back.
  */
-void SIGINT_handler(int signo) {}
-
-/*
- *
- */
-void SIGTSTP_handler(int signo) {}
+void SIGTSTP_handler(int signo) {
+    if (isForegroundOnly == 0) {
+        isForegroundOnly = 1;
+        write(STDOUT_FILENO,
+              "\nEntering foreground-only mode (& is now ignored)\n",
+              50);
+    } else {
+        isForegroundOnly = 0;
+        write(STDOUT_FILENO, "\nExiting foreground-only mode\n", 30);
+    } 
+}
