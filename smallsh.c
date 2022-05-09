@@ -1,5 +1,5 @@
 
-/* 
+/*
  * Author: Daniel Sarran
  * CS 344
  * Assignment: smallsh
@@ -20,19 +20,28 @@
 /* Constants. */
 #define MAX_ARGUMENT_COUNT 512
 #define MAX_COMMAND_LINE_LENGTH 2048
+#define BACKGROUND_PID_ARRAY_LENGTH 16
 
 /* Global variables. */
 const char* CD = "cd";
 const char* STATUS = "status";
 const char* EXIT = "exit";
 
-/* Main shell state structure. */
+/*
+ * Shell state structure.
+ * Rather than hold various flags and memory blocks and manually passing them
+ * to functions, and clearing them at each new command prompt, everything
+ * is placed in a struct to pass as a single parameter, or zero out at
+ * start of each command prompt.
+ */
 typedef struct {
     char* arguments[MAX_ARGUMENT_COUNT + 1];
     char commandString[MAX_COMMAND_LINE_LENGTH + 1];
     char expanded[MAX_COMMAND_LINE_LENGTH + 1];
+    pid_t backgroundProcesses[BACKGROUND_PID_ARRAY_LENGTH];
     bool isForkActive;
     bool hasBackgroundFlag;
+    bool hasForegroundOnlyFlag;
     bool hasInputRedirect;
     bool hasOutputRedirect;
     int inputFileArgIndex;
@@ -42,6 +51,7 @@ typedef struct {
 } ShellState;
 
 /* Function prototypes. */
+void reapBackgroundProcesses(ShellState* shellState);
 int takeInput(ShellState* shellState);
 void parseArgumentTokens(ShellState* shellState);
 void expandCommand(ShellState* shellState);
@@ -52,21 +62,24 @@ int executeCommand(ShellState* shellState);
 
 /*
  * Main loop. Creates a small shell. Not large. Not Medium. Smol. Supports
- * file navigation, shell commands using forking, I/O redirection operators as 
+ * file navigation, shell commands using forking, I/O redirection operators as
  * well as * execution of background processes and orphan reaping.
  */
 int main(void) {
-    /* Initialize shellState.command line structure. */
     ShellState shellState;
 
     while (shellState.isForkActive == false) {
-        /* Clear state and issue prompt. */
+        /* Reap background processes.  */
+        reapBackgroundProcesses(&shellState);
+
+        /* Clear shell state and issue prompt. */
         memset(&shellState, 0, sizeof(shellState));
         shellState.pid = getpid();
 
-        /* Receive user command. */
+        /* Prompt and receive user command. */
         if (takeInput(&shellState) != 0) {
-            err(1, "ERROR: fgets() failed. Please try again.\n");
+            fprintf(stdout, "fgets() error");
+            fflush(stdout);
             continue;
         }
         /* Handle blank lines and comments.  */
@@ -99,6 +112,11 @@ int main(void) {
 }
 
 /*
+ *
+ */
+void reapBackgroundProcesses(ShellState* shellState) {}
+
+/*
  * Prompts user for command and arguments. Takes in a line of input via stdin.
  * Removes trailing newline. Receives shell state struct. Returns 0 if success,
  * 1 otherwise.
@@ -106,6 +124,7 @@ int main(void) {
 int takeInput(ShellState* shellState) {
     /* Command prompt. */
     fprintf(stderr, ": ");
+    fflush(stdout);
 
     /* Take input from stdin. */
     if (fgets(shellState->commandString, sizeof(shellState->commandString),
@@ -121,7 +140,7 @@ int takeInput(ShellState* shellState) {
 }
 
 /*
- * Performs variable expansion from `commandString` buffer and copies to 
+ * Performs variable expansion from `commandString` buffer and copies to
  * `expanded` buffer. Instances of "$$" are replaced by a string of the
  * shell process ID. Receives a shell state struct.
  */
@@ -168,7 +187,7 @@ void expandCommand(ShellState* shellState) {
 
 /*
  * Convert expanded user command string into an array of arguments. The
- * arguments in the command string are space-delimited. Identifies redirection 
+ * arguments in the command string are space-delimited. Identifies redirection
  * operators and background process operators.
  */
 void parseArgumentTokens(ShellState* shellState) {
@@ -196,8 +215,10 @@ void parseArgumentTokens(ShellState* shellState) {
     shellState->arguments[i] = NULL;
 
     /* If last character of command is '&', set background flag. */
-    if (*shellState->arguments[i - 1] == '&')
+    if (*shellState->arguments[i - 1] == '&') {
         shellState->hasBackgroundFlag = true;
+        shellState->arguments[i - 1] = NULL;
+    }
 }
 
 /*
@@ -210,7 +231,7 @@ void cleanupProcessesBeforeExit(ShellState* shellState) {
 
 /*
  * Change shell directory. If no path is provided, changes directory to the
- * user's HOME environment variable. Supports both relative and absolute 
+ * user's HOME environment variable. Supports both relative and absolute
  * directory changes.
  */
 void changeDirectory(ShellState* shellState) {
@@ -225,15 +246,15 @@ void changeDirectory(ShellState* shellState) {
 
 /*
  * Checks last foreground program termination status. Receives shell state
- * struct. 
+ * struct.
  */
 void checkStatus(ShellState* shellState) {
-    // TODO: check status.
     fprintf(stdout, "exit value %d\n", shellState->status);
+    fflush(stdout);
 }
 
 /*
- * Executes a non-built-in command with user provided arguments. Handles 
+ * Executes a non-built-in command with user provided arguments. Handles
  * input/output redirection. Receives shell state struct and returns 0 when
  * successful, 1 otherwise.
  */
@@ -242,56 +263,104 @@ int executeCommand(ShellState* shellState) {
     int childExitMethod = -5;
     spawnPid = fork();
 
-    if (spawnPid == -1) {
-        perror("fork() failed.");
-        return 1;
+    switch (spawnPid) {
+        case -1:
+            /* Handle forking errors.  */
+            fprintf(stdout, "fork() failed.");
+            fflush(stdout);
+            return 1;
 
-    } else if (spawnPid == 0) {  // Child process
-        /* Change file descriptors prior to execution, for redirection. */
-        if (shellState->hasInputRedirect == true) {
-            int sourceFileDescriptor = open(shellState->arguments[shellState->inputFileArgIndex], O_RDONLY);
-            if (sourceFileDescriptor == -1) {
-                perror("source open()");
-                return 1;
+        case 0:
+            /* Redirect input, as necessary. */
+            if (shellState->hasInputRedirect == true) {
+                int sourceFileDescriptor =
+                    open(shellState->arguments[shellState->inputFileArgIndex],
+                         O_RDONLY);
+                if (sourceFileDescriptor == -1) {
+                    fprintf(
+                        stdout, "cannot open %s for input\n",
+                        shellState->arguments[shellState->inputFileArgIndex]);
+                    fflush(stdout);                    
+                    shellState->isForkActive = false;
+                    shellState->status = 1;
+                    exit(1);
+                }
+                if (dup2(sourceFileDescriptor, 0) == -1) {
+                    fprintf(stdout, "unable to redirect input\n");
+                    fflush(stdout);                    
+                    shellState->isForkActive = false;
+                    exit(1);
+                }
             }
-            if (dup2(sourceFileDescriptor, 0) == -1) {
-                perror("source dup2()");
-                return 1;
+            /* Redirect output, as necessary. */
+            if (shellState->hasOutputRedirect == true) {
+                int targetFileDescriptor =
+                    open(shellState->arguments[shellState->outputFileArgIndex],
+                         O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (targetFileDescriptor == -1) {
+                    fprintf(
+                        stdout, "cannot open %s for output",
+                        shellState->arguments[shellState->inputFileArgIndex]);
+                    fflush(stdout);
+                    shellState->isForkActive = false;
+                    shellState->status = 1;
+                    exit(1);
+                }
+                if (dup2(targetFileDescriptor, 1) == -1) {
+                    fprintf(stdout, "unable to redirect output");
+                    fflush(stdout);
+                    shellState->isForkActive = false;
+                    exit(1);
+                }
             }
-        }
-        if (shellState->hasOutputRedirect == true) {
-            int targetFileDescriptor = open(shellState->arguments[shellState->outputFileArgIndex], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (targetFileDescriptor == -1) {
-                perror("target dup2()");
-                return 1;
-            }
-            if (dup2(targetFileDescriptor, 1)  == -1) {
-                perror("target dup2()");
-                return 1;
-            }
-        }
-        /* Execute command. */
-        execvp(*shellState->arguments, shellState->arguments);
-        perror("  ERROR: execvp() failed");
-        return 1;
+            /* Execute command. */
+            execvp(*shellState->arguments, shellState->arguments);
 
-    } // Parent process.
-    if (shellState->hasBackgroundFlag == false) {
-        // IF: Command is in the foreground:
-        waitpid(spawnPid, &childExitMethod, 0);
-        /* Update exit status. */
-        if (WIFEXITED(childExitMethod) != 0) {
-            shellState->status = WEXITSTATUS(childExitMethod);
-        } else {
-            shellState->status = WTERMSIG(childExitMethod);
-        }
+            /* Error handling for execvp. */
+            fprintf(stdout, "unable to execute command\n");
+            fflush(stdout);
+            shellState->isForkActive = false;
+            exit(1);
 
-    } else {
-        // ELSE: Don't (also if foreground-only mode flag is true)
-        // TODO: waitpid(... WNOHANG)
+        default:
+            if (shellState->hasBackgroundFlag == false) {
+                /* Foreground processes: child blocks parent.  */
+                waitpid(spawnPid, &childExitMethod, 0);
+
+                /* Update exit status of foreground process. */
+                if (WIFEXITED(childExitMethod) != 0) {
+                    shellState->status = WEXITSTATUS(childExitMethod);
+                } else {
+                    shellState->status = WTERMSIG(childExitMethod);
+                }
+
+            } else {
+                /* Background processes: child does not block.  */
+                waitpid(spawnPid, &childExitMethod, WNOHANG);
+                fprintf(stdout, "background pid is %ld\n", spawnPid);
+                fflush(stdout);
+
+                /* Cache pid of current background process into buffer. */
+                for (int i = 0; i < BACKGROUND_PID_ARRAY_LENGTH; i++) {
+                    if (shellState->backgroundProcesses[i] == 0) {
+                        shellState->backgroundProcesses[i] = spawnPid;
+                        break;
+                    }
+                }
+            }
+            /* Reset fork flag. */
+            shellState->isForkActive = false;
+
+            /* Reap background processes prior to next prompt.  */
+            pid_t pid;
+            while ((pid = waitpid(-1, &childExitMethod, WNOHANG)) > 0)
+                    if (WIFEXITED(childExitMethod) != 0) {
+                        fprintf(stdout, "background pid %ld is done: exit status %d\n", pid, WEXITSTATUS(childExitMethod));
+                    } else {
+                        fprintf(stdout, "background pid %ld is done: terminated by signal %d\n", pid, WTERMSIG(childExitMethod));
+                    }
+                    fflush(stdout);
+
+            return 0;
     }
-
-    /* Reset fork flag. */
-    shellState->isForkActive = false;
-    return 0;
 }
