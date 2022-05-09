@@ -28,6 +28,7 @@ const char* CD = "cd";
 const char* STATUS = "status";
 const char* EXIT = "exit";
 int status = 0;
+bool wasTerminatedBySignal = 0;
 volatile sig_atomic_t isForegroundOnly = 0;
 
 /*
@@ -55,13 +56,14 @@ typedef struct {
 } ShellState;
 
 /* Function prototypes. */
+void reapBackgroundProcesses();
 void takeInput(ShellState* shellState);
 void parseArgumentTokens(ShellState* shellState);
 void expandCommand(ShellState* shellState);
 void cleanupProcessesBeforeExit(ShellState* shellState);
 void changeDirectory(ShellState* shellState);
 void checkStatus(ShellState* shellState);
-int executeCommand(ShellState* shellState);
+void executeCommand(ShellState* shellState);
 void SIGINT_handler(int signo);
 void SIGTSTP_handler(int signo);
 
@@ -89,6 +91,9 @@ int main(void) {
         /* Clear shell state prior to prompt. */
         memset(&shellState, 0, sizeof(shellState));
         shellState.pid = getpid();
+
+        /* Reap background processes. */
+        reapBackgroundProcesses();
 
         /* Prompt and receive user command. */
         takeInput(&shellState);
@@ -123,13 +128,37 @@ int main(void) {
 }
 
 /*
+ * Kills orphaned zombie children.
+ */
+void reapBackgroundProcesses() {
+    /* Reap background processes prior to next prompt.  */
+    pid_t pid;
+    int childExitMethod = -5;
+    while ((pid = waitpid(-1, &childExitMethod, WNOHANG)) > 0) {
+        if (WIFEXITED(childExitMethod) != 0) {
+            wasTerminatedBySignal = 0;
+            status = WEXITSTATUS(childExitMethod);
+            fprintf(stdout, "background pid %ld is done: exit status %d\n", pid,
+                    status);
+
+        } else {
+            wasTerminatedBySignal = 1;
+            status = WTERMSIG(childExitMethod);
+            fprintf(stdout,
+                    "background pid %ld is done: terminated by signal %d\n",
+                    pid, WTERMSIG(childExitMethod));
+            fflush(stdout);
+        }
+    }
+}
+
+/*
  * Prompts user for command and arguments. Takes in a line of input via stdin.
- * Removes trailing newline. Receives shell state struct. Returns 0 if success,
- * 1 otherwise.
+ * Removes trailing newline. Receives shell state struct.
  */
 void takeInput(ShellState* shellState) {
     /* Command prompt. */
-    fprintf(stderr, ": ");
+    fprintf(stdout, ": ");
     fflush(stdout);
 
     /* Take input from stdin. */
@@ -190,7 +219,7 @@ void expandCommand(ShellState* shellState) {
 /*
  * Convert expanded user command string into an array of arguments. The
  * arguments in the command string are space-delimited. Identifies redirection
- * operators and background process operators.
+ * operators and background process operators. Receives a shell state struct.
  */
 void parseArgumentTokens(ShellState* shellState) {
     char* token = strtok(shellState->expanded, " ");
@@ -259,8 +288,14 @@ void changeDirectory(ShellState* shellState) {
  * struct.
  */
 void checkStatus(ShellState* shellState) {
-    fprintf(stdout, "exit value %d\n", status);
-    fflush(stdout);
+    if (wasTerminatedBySignal == false) {
+        fprintf(stdout, "exit value %d\n", status);
+        fflush(stdout);
+
+    } else {
+        fprintf(stdout, "terminated by signal %d\n", status);
+        fflush(stdout);
+    }
 }
 
 /*
@@ -268,16 +303,16 @@ void checkStatus(ShellState* shellState) {
  * input/output redirection. Receives shell state struct and returns 0 when
  * successful, 1 otherwise.
  */
-int executeCommand(ShellState* shellState) {
+void executeCommand(ShellState* shellState) {
     pid_t spawnPid = -5;
     int childExitMethod = -5;
     spawnPid = fork();
 
     switch (spawnPid) {
         case -1: /* Fork error.  */
-            fprintf(stdout, "fork() failed.");
-            fflush(stdout);
-            return 1;
+            fprintf(stderr, "fork() failed.");
+            fflush(stderr);
+            return;
 
         case 0: /* Child process.  */
             /* Redirect input, as necessary. */
@@ -293,8 +328,8 @@ int executeCommand(ShellState* shellState) {
                     exit(1);
                 }
                 if (dup2(sourceFileDescriptor, 0) == -1) {
-                    fprintf(stdout, "unable to redirect input\n");
-                    fflush(stdout);
+                    fprintf(stderr, "unable to redirect input\n");
+                    fflush(stderr);
                     exit(1);
                 }
             }
@@ -312,12 +347,11 @@ int executeCommand(ShellState* shellState) {
                     exit(1);
                 }
                 if (dup2(targetFileDescriptor, 1) == -1) {
-                    fprintf(stdout, "unable to redirect output");
-                    fflush(stdout);
+                    fprintf(stderr, "unable to redirect output");
+                    fflush(stderr);
                     exit(1);
                 }
             }
-
             /* If foreground process, give SIGINT has default behavior.  */
             if (shellState->hasBackgroundFlag == false) {
                 struct sigaction SIGINT_action = {0};
@@ -326,28 +360,29 @@ int executeCommand(ShellState* shellState) {
                 SIGINT_action.sa_flags = 0;
                 sigaction(SIGINT, &SIGINT_action, NULL);
             }
-
             /* Execute command. */
             execvp(*shellState->arguments, shellState->arguments);
 
             /* Error handling for execvp. */
-            fprintf(stdout, "unable to execute command\n");
+            fprintf(stdout, "%s: no such file or directory\n",
+                    *shellState->arguments);
             fflush(stdout);
             exit(1);
 
         default: /* Parent process. */
-
             if (shellState->hasBackgroundFlag == false) {
                 /* Foreground processes: child blocks parent.  */
                 waitpid(spawnPid, &childExitMethod, 0);
 
                 /* Update exit status of foreground process. */
                 if (WIFEXITED(childExitMethod) != 0) {
-                    printf("exit status was %d\n", WEXITSTATUS(childExitMethod));
+                    wasTerminatedBySignal = 0;
                     status = WEXITSTATUS(childExitMethod);
                 } else {
+                    wasTerminatedBySignal = 1;
                     status = WTERMSIG(childExitMethod);
-                    fprintf(stdout, "terminated by signal %d\n", childExitMethod);
+                    fprintf(stdout, "terminated by signal %d\n", status);
+                    fflush(stdout);
                 }
             } else {
                 /* Background processes: child does not block.  */
@@ -361,28 +396,8 @@ int executeCommand(ShellState* shellState) {
                     break;
                 }
             }
-
             /* Reset fork flag. */
             shellState->isForkActive = false;
-
-            /* Reap background processes prior to next prompt.  */
-            pid_t pid;
-            while ((pid = waitpid(-1, &childExitMethod, WNOHANG)) > 0)
-                if (WIFEXITED(childExitMethod) != 0) {
-                    fprintf(stdout,
-                            "background pid %ld is done: exit status %d\n", pid,
-                            WEXITSTATUS(childExitMethod));
-                    fflush(stdout);
-
-                } else {
-                    fprintf(
-                        stdout,
-                        "background pid %ld is done: terminated by signal %d\n",
-                        pid, WTERMSIG(childExitMethod));
-                    fflush(stdout);
-                }
-
-            return 0;
     }
 }
 
@@ -394,10 +409,9 @@ void SIGTSTP_handler(int signo) {
     if (isForegroundOnly == 0) {
         isForegroundOnly = 1;
         write(STDOUT_FILENO,
-              "\nEntering foreground-only mode (& is now ignored)\n",
-              50);
+              "\nEntering foreground-only mode (& is now ignored)\n", 50);
     } else {
         isForegroundOnly = 0;
         write(STDOUT_FILENO, "\nExiting foreground-only mode\n", 30);
-    } 
+    }
 }
