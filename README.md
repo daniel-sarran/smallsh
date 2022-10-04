@@ -16,17 +16,12 @@ These are the questions to be answered in the development of this program.
 Core functionalities include:
 1) User prompt for commands
   - Input validation handles spaces, comments (`\#`)
-  - 
 2) Supports execution of commands
   - Built-in commands `cd`, `status`, `exit`
   - External commands from `exec` family of functions (e.g. `ls`) using forking and child processes
-
 3) Supports execution of input (`<`) and output (`>`) redirection
-
 4) Supports execution of background processes (`&`)
-
 5) Variable expansion (`$$` exchanged for process ID of shell)
-
 6) Supports signal interruption (`CTRL+Z`, `CTRL+C`)
 
 ### General syntax of command line
